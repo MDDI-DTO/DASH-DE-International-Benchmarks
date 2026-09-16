@@ -861,12 +861,15 @@ function gariEraLabel(era) { return GARI_ERA_LABEL[era] || 'GARI'; }
 
 /* ============================================================
    AII (Artificial Intelligence Index) — Stanford HAI
-   Score-based, NOT rank-based: the `rank` column is always empty
-   for this publication; every value lives in `score` with a
-   per-row `unit` (units vary across sub-indicators — never
-   compare across units). Pillars vary by year (5 in 2023/2024,
-   6 from 2025 onward) and sub-indicators repeat as time-series
-   rows sharing one sub_indicator name — the latest row wins. */
+   Score-based with per-row ranks: every value lives in `score`
+   with a per-row `unit` (units vary across sub-indicators —
+   never compare across units) and rows carry a published `rank`
+   where the live data provides one. There is no overall country
+   rank; indicator-level ranks for breakdown sub-indicators are
+   derived from the average of component scores. Pillars vary by
+   year (5 in 2023/2024, 6 from 2025 onward) and sub-indicators
+   repeat as time-series rows sharing one sub_indicator name —
+   the latest row wins. */
 const AII_PUB = 'Stanford AI Index';
 const AII_PILLARS = ['Research & Development', 'Economy', 'Education', 'Policy and Governance', 'Public Opinion', 'Responsible AI'];
 const AII_ICONS = {
@@ -948,69 +951,107 @@ function aiiPillarSubIndicators(pillar, year, country) {
    "headline score" per pillar. Each card shows how many indicators are tracked
    and lists their (abbreviated) names as click-to-filter badges. */
 function aii2025Cards(country, year) {
-  const MAX_BADGES = 3;
   return aiiPillars(year).map(p => {
     const names = aiiPillarSubIndicators(p, year, country);
     return {
       pillar: p, count: names.length,
-      badges: names.slice(0, MAX_BADGES).map(n => ({ raw: n, abbr: abbreviateSubIndicator(n) })),
-      remaining: Math.max(0, names.length - MAX_BADGES),
+      badges: names.map(n => ({ raw: n, abbr: abbreviateSubIndicator(n) })),
+      remaining: 0,
     };
   });
 }
+/* derived indicator-level ranks for a breakdown sub-indicator: the publication
+   carries ranks only on the component (third-tier) rows, so indicator ranks
+   are computed by averaging each country's component scores and ranking the
+   averages (descending). Returns Map(country base -> rank), empty when no
+   data exists for that year. */
+function aiiDerivedRankMap(pillar, sub, year) {
+  const sums = new Map(); // country base -> { sum, n }
+  for (const r of RECS) if (r.p === AII_PUB && r.i === pillar && r.s === sub && r.t && r.y === year && r.sc != null) {
+    const c = aiiCountryBase(r.c);
+    const e = sums.get(c) || { sum: 0, n: 0 };
+    e.sum += r.sc; e.n++;
+    sums.set(c, e);
+  }
+  const ordered = [...sums.entries()].map(([c, e]) => ({ c, v: e.sum / e.n })).sort((a, b) => b.v - a.v);
+  return new Map(ordered.map((x, i) => [x.c, i + 1]));
+}
+function aiiDerivedParentRank(pillar, sub, year, country) {
+  const rank = aiiDerivedRankMap(pillar, sub, year).get(aiiCountryBase(country));
+  return rank == null ? null : rank;
+}
 /* grouped table rows for a pillar/country/year: each sub-indicator with its
-   third-tier breakdown (if any) nested as children. Third-tier categories are
-   breakdown dimensions of one sub-indicator, not separate indicators. */
+   third-tier breakdown (if any) nested as children, every row carrying its
+   published rank + score for the selected year and the previous year.
+   Third-tier categories are breakdown dimensions of one sub-indicator, not
+   separate indicators. Breakdown parents have no published indicator-level
+   rank, so it is derived from the average of component scores (rankDerived). */
 function aiiSubTableGrouped(pillar, country, year) {
   const map = new Map();
   for (const r of RECS) if (r.p === AII_PUB && r.i === pillar && r.y === year && r.s && aiiCountryMatches(r.c, country)) {
     let g = map.get(r.s);
-    if (!g) { g = { sub: r.s, unit: r.u, hasBreakdown: false, flatScore: null, prevFlatScore: null, children: new Map() }; map.set(r.s, g); }
-    if (r.t) { g.hasBreakdown = true; g.children.set(r.t, { label: r.t, score: r.sc, prevScore: null, unit: r.u }); }
-    else { g.flatScore = r.sc; g.unit = r.u; }
+    if (!g) { g = { sub: r.s, unit: r.u, hasBreakdown: false, flatScore: null, prevFlatScore: null, flatRank: null, prevFlatRank: null, rankDerived: false, children: new Map() }; map.set(r.s, g); }
+    if (r.t) { g.hasBreakdown = true; g.children.set(r.t, { label: r.t, score: r.sc, rank: r.r, prevScore: null, prevRank: null, unit: r.u }); }
+    else { g.flatScore = r.sc; g.flatRank = r.r; g.unit = r.u; }
   }
   for (const r of RECS) if (r.p === AII_PUB && r.i === pillar && r.y === year - 1 && r.s && aiiCountryMatches(r.c, country)) {
     const g = map.get(r.s);
     if (!g) continue;
-    if (r.t) { const c = g.children.get(r.t); if (c) c.prevScore = r.sc; }
-    else if (!g.hasBreakdown) g.prevFlatScore = r.sc;
+    if (r.t) { const c = g.children.get(r.t); if (c) { c.prevScore = r.sc; c.prevRank = r.r; } }
+    else if (!g.hasBreakdown) { g.prevFlatScore = r.sc; g.prevFlatRank = r.r; }
+  }
+  for (const g of map.values()) if (g.hasBreakdown && g.flatRank == null) {
+    g.flatRank = aiiDerivedParentRank(pillar, g.sub, year, country);
+    g.prevFlatRank = aiiDerivedParentRank(pillar, g.sub, year - 1, country);
+    g.rankDerived = g.flatRank != null || g.prevFlatRank != null;
   }
   return [...map.values()]
     .map(g => ({ ...g, children: [...g.children.values()].sort((a, b) => a.label.localeCompare(b.label)) }))
     .sort((a, b) => a.sub.localeCompare(b.sub));
 }
 /* one country's bars for a single (sub, third) combination — third defaults to
-   '' (the flat/no-breakdown series). */
+   '' (the flat/no-breakdown series). Rank-led: rows sort by published rank
+   (ascending, best first) and carry prevRank for YoY-of-rank display; the
+   score is kept only as supporting info (tooltips), never as the bar metric. */
 function aiiCompareCountries(pillar, sub, year, third = '') {
   const map = new Map();
-  for (const r of RECS) if (r.p === AII_PUB && r.i === pillar && r.s === sub && (r.t || '') === (third || '') && r.y === year && r.sc != null) map.set(aiiCountryBase(r.c), r);
+  for (const r of RECS) if (r.p === AII_PUB && r.i === pillar && r.s === sub && (r.t || '') === (third || '') && r.y === year && (r.r != null || r.sc != null)) map.set(aiiCountryBase(r.c), r);
   let rows = [...map.values()];
   if (!rows.length) return [];
   const unit = rows[0].u;
   rows = rows.filter(r => r.u === unit);
-  rows.sort((a, b) => b.sc - a.sc);
+  rows.sort((a, b) => (a.r ?? 1e9) - (b.r ?? 1e9) || (b.sc ?? -1e18) - (a.sc ?? -1e18));
   const prevMap = new Map();
-  for (const r of RECS) if (r.p === AII_PUB && r.i === pillar && r.s === sub && (r.t || '') === (third || '') && r.y === year - 1 && r.sc != null) prevMap.set(aiiCountryBase(r.c), r.sc);
-  return rows.map((r, i) => ({ country: aiiCountryBase(r.c), score: r.sc, unit: r.u, pos: i + 1, prevScore: prevMap.has(aiiCountryBase(r.c)) ? prevMap.get(aiiCountryBase(r.c)) : null }));
+  for (const r of RECS) if (r.p === AII_PUB && r.i === pillar && r.s === sub && (r.t || '') === (third || '') && r.y === year - 1 && r.r != null) prevMap.set(aiiCountryBase(r.c), r.r);
+  return rows.map((r, i) => {
+    const c = aiiCountryBase(r.c);
+    return { country: c, rank: r.r, prevRank: prevMap.has(c) ? prevMap.get(c) : null, score: r.sc, unit: r.u, pos: i + 1 };
+  });
 }
 /* per-country breakdown across all third-tier categories of one sub-indicator —
-   feeds the grouped (<=5 categories) or stacked (>5) bar chart. */
+   feeds the grouped (<=5 categories) bar chart or the (>5) rank scorecard.
+   Rank-led: each cell carries the published component rank (bars/cells plot
+   ranks, never scores — score kept for tooltips only); countries are ordered
+   by the derived indicator rank (average of component scores), with prevRank
+   for YoY-of-rank display. */
 function aiiCompareBreakdown(pillar, sub, year) {
   const byCountry = new Map(), cats = [];
+  const maxRank = new Map(); // category -> highest published rank (for bar scaling)
   let unit = '';
-  for (const r of RECS) if (r.p === AII_PUB && r.i === pillar && r.s === sub && r.t && r.y === year && r.sc != null) {
+  for (const r of RECS) if (r.p === AII_PUB && r.i === pillar && r.s === sub && r.t && r.y === year && (r.r != null || r.sc != null)) {
     const c = aiiCountryBase(r.c);
     if (!cats.includes(r.t)) cats.push(r.t);
     if (!byCountry.has(c)) byCountry.set(c, new Map());
-    byCountry.get(c).set(r.t, r.sc);
+    byCountry.get(c).set(r.t, { rank: r.r, score: r.sc });
+    if (r.r != null && r.r > (maxRank.get(r.t) || 0)) maxRank.set(r.t, r.r);
     unit = r.u;
   }
-  const countries = [...byCountry.keys()].sort((a, b) => {
-    const ta = [...byCountry.get(a).values()].reduce((s, v) => s + v, 0);
-    const tb = [...byCountry.get(b).values()].reduce((s, v) => s + v, 0);
-    return tb - ta;
-  });
-  return { categories: cats, countries, byCountry, unit, type: cats.length > 5 ? 'scorecard' : 'grouped' };
+  const derivedCur = aiiDerivedRankMap(pillar, sub, year);
+  const derivedPrev = aiiDerivedRankMap(pillar, sub, year - 1);
+  const derived = new Map();
+  for (const c of byCountry.keys()) derived.set(c, { rank: derivedCur.get(c) ?? null, prevRank: derivedPrev.get(c) ?? null });
+  const countries = [...byCountry.keys()].sort((a, b) => ((derived.get(a).rank ?? 1e9) - (derived.get(b).rank ?? 1e9)) || a.localeCompare(b));
+  return { categories: cats, countries, byCountry, derived, maxRank, unit, type: cats.length > 5 ? 'scorecard' : 'grouped' };
 }
 /* sub-indicator table rows for the selected pillar/country/year, each carrying
    its own unit + prior-year score for the same (deduplicated) sub-indicator. */
@@ -1024,7 +1065,7 @@ function aiiSubTable(pillar, country, year) {
 
 Object.assign(window, {
   AII_PUB, AII_PILLARS, AII_ICONS, aiiYears, aiiCountries, aiiCountryMatches, aiiCountryBase, aiiPillars,
-  aiiSubRows, aiiPillarSubIndicators, aii2025Cards, aiiSubTable, aiiSubTableGrouped, aiiCompareCountries, aiiCompareBreakdown,
+  aiiSubRows, aiiPillarSubIndicators, aii2025Cards, aiiSubTable, aiiSubTableGrouped, aiiCompareCountries, aiiCompareBreakdown, aiiDerivedParentRank, aiiDerivedRankMap,
 });
 
 Object.assign(window, {

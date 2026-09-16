@@ -1,12 +1,14 @@
 /* ============================================================
    DASHDE — AII (Artificial Intelligence Index · Stanford HAI)
-   Score-based, NOT rank-based: the `rank` column is always empty
-   for this publication. No overall rank/YoY-rank anywhere; every
-   value is a `score` with its own `unit` — never compare across
-   units on one chart. Header is a single descriptive card (no
-   rank box), pillar cards are score-led, and the drill-in below
-   is a country-comparison bar chart (same unit only) + a
-   sub-indicator table with per-row units.
+   Score-based with per-row ranks: every value is a `score` with
+   its own `unit` — never compare across units on one chart — and
+   each row carries a published rank; breakdown parents get a
+   derived rank (average of component scores, marked *). No
+   overall country rank exists, so the header is a single
+   descriptive card (no rank box), and the drill-in below is a
+   country-comparison bar chart (same unit only) + a
+   sub-indicator table with rank + score for the selected and
+   previous year.
    ============================================================ */
 const AII_ACCENT = '#0F766E';
 const AII_DARK = '#0D5E57';
@@ -20,6 +22,17 @@ function AIIPageFoot() {
   );
 }
 function truncateBadge(name, maxChars = 30) { return name && name.length > maxChars ? name.slice(0, maxChars) + '\u2026' : (name || ''); }
+/* strip year / year-range info (e.g. ", 2014-2024", "(average 2017-2019)",
+   "(2024)") from a sub-indicator name for badge display \u2014 keep everything else. */
+function stripYearInfo(name) {
+  return (name || '')
+    .replace(/\(\s*(?:average\s+)?(?:19|20)\d{2}(?:\s*[-\u2013\u2014]\s*(?:19|20)\d{2})?\s*\)/gi, '')
+    .replace(/[,;\u00b7]\s*(?:19|20)\d{2}(?:\s*[-\u2013\u2014]\s*(?:19|20)\d{2})?/g, '')
+    .replace(/\s+(?:19|20)\d{2}\s*[-\u2013\u2014]\s*(?:19|20)\d{2}\s*$/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/[,;\u00b7\s]+$/, '')
+    .trim();
+}
 function aiiArrow(cur, prev) {
   if (cur == null) return null;
   if (prev == null) return <span className="td-arrow muted"> —</span>;
@@ -34,10 +47,18 @@ function aiiYoYCell(cur, prev) {
   if (d < 0) return <span style={{ color: 'var(--color-down)' }}>↓ {fmtScore(Math.abs(d))}</span>;
   return <span className="muted">—</span>;
 }
-function aiiDirIcon(cur, prev) {
-  if (cur == null || prev == null) return <span className="muted">—</span>;
-  if (cur > prev) return <span style={{ color: 'var(--color-up)' }}>↑</span>;
-  if (cur < prev) return <span style={{ color: 'var(--color-down)' }}>↓</span>;
+/* rank cell: published rank as e.g. "5th"; derived indicator-level ranks
+   (computed from average component scores) carry a "*" tied to the note. */
+function aiiRankCell(rank, derived) {
+  if (rank == null) return <span className="muted">—</span>;
+  return <>{rank}<span className="muted" style={{ fontSize: '0.85em' }}>{ordinal(rank)}</span>{derived ? <span className="muted">*</span> : null}</>;
+}
+/* YoY change of RANK (not score): rank going DOWN is an improvement. */
+function aiiRankYoY(rank, prevRank) {
+  if (rank == null || prevRank == null) return <span className="muted">—</span>;
+  const d = prevRank - rank;
+  if (d > 0) return <span style={{ color: 'var(--color-up)' }}>↑{d}</span>;
+  if (d < 0) return <span style={{ color: 'var(--color-down)' }}>↓{Math.abs(d)}</span>;
   return <span className="muted">—</span>;
 }
 function aiiBarLabelColor(pct) { return pct < 30 ? '#111827' : '#FFFFFF'; }
@@ -46,46 +67,67 @@ function aiiBreakdownColor(i) { return AII_BREAKDOWN_PALETTE[i % AII_BREAKDOWN_P
 function AIIBreakdownLegend({ categories }) {
   return <div className="aii-legend">{categories.map((cat, i) => <span key={cat} className="aii-legend-item"><span className="aii-legend-swatch" style={{ background: aiiBreakdownColor(i) }} />{cat}</span>)}</div>;
 }
+/* grouped chart — bars plot the published component RANKS (1st = longest bar,
+   never scores; the score appears only in the hover tooltip). Each country row
+   leads with its derived indicator rank (*, average of component scores) and
+   the YoY change of that rank where available. */
 function AIIGroupedChart({ data, selectedCountry, onPick }) {
   if (!data || !data.countries.length) return <div className="es-sub" style={{ padding: '30px 0', textAlign: 'center' }}>No comparison data available for this sub-indicator.</div>;
-  const max = Math.max(0.0001, ...data.countries.flatMap(c => [...data.byCountry.get(c).values()]));
+  const hasYoY = data.countries.some(c => { const d = data.derived.get(c); return d && d.prevRank != null; });
   return (
     <div className="barchart barchart-scroll">
       <AIIBreakdownLegend categories={data.categories} />
-      {data.countries.map(c => (
-        <div key={c} className={'aii-group-row' + (c === selectedCountry ? ' selected' : '')} onClick={onPick ? () => onPick(c) : undefined}>
-          <span className="bar-flag" title={flagUrl(c) ? undefined : c}>{flagUrl(c) ? <img src={flagUrl(c)} alt="" onError={e => e.currentTarget.remove()} /> : null}</span>
-          <span className="aii-group-name">{c}</span>
-          <div className="aii-group-bars">
-            {data.categories.map((cat, i) => { const v = data.byCountry.get(c).get(cat); const pct = v != null ? Math.max(2, (v / max) * 100) : 0; const inside = pct > 30;
-              return (
-                <div key={cat} className="aii-group-bar-track" title={cat + ': ' + (v != null ? fmtScore(v) : '—')}>
-                  <div className="aii-group-bar-fill" style={{ width: pct + '%', background: aiiBreakdownColor(i) }}>
-                    {v != null && inside && <span className="aii-group-bar-label inside">{fmtScore(v)}</span>}
+      {data.countries.map(c => {
+        const d = data.derived.get(c) || { rank: null, prevRank: null };
+        return (
+          <div key={c} className={'aii-group-row' + (c === selectedCountry ? ' selected' : '')} onClick={onPick ? () => onPick(c) : undefined}>
+            <span className="bar-rank" title="Derived indicator rank (average of component scores)">{d.rank != null ? <>{d.rank}{ordinal(d.rank)}<span className="muted">*</span></> : <span className="muted">—</span>}</span>
+            {hasYoY && <span className="aii-yoy-left" title="YoY change of derived indicator rank">{aiiRankYoY(d.rank, d.prevRank)}</span>}
+            <span className="bar-flag" title={flagUrl(c) ? undefined : c}>{flagUrl(c) ? <img src={flagUrl(c)} alt="" onError={e => e.currentTarget.remove()} /> : null}</span>
+            <span className="aii-group-name">{c}</span>
+            <div className="aii-group-bars">
+              {data.categories.map((cat, i) => {
+                const cell = data.byCountry.get(c).get(cat);
+                const rank = cell ? cell.rank : null;
+                const mr = Math.max(1, data.maxRank.get(cat) || 1);
+                const pct = rank != null ? Math.max(8, ((mr - rank + 1) / mr) * 100) : 0;
+                const inside = pct > 30;
+                const label = rank != null ? rank + ordinal(rank) : null;
+                const tip = cat + ': ' + (rank != null ? 'rank ' + rank + ordinal(rank) : 'no rank') + (cell && cell.score != null ? ' · score ' + fmtScore(cell.score) : '');
+                return (
+                  <div key={cat} className="aii-group-bar-track" title={tip}>
+                    <div className="aii-group-bar-fill" style={{ width: pct + '%', background: aiiBreakdownColor(i) }}>
+                      {label && inside && <span className="aii-group-bar-label inside">{label}</span>}
+                    </div>
+                    {label && !inside && <span className="aii-group-bar-label outside">{label}</span>}
                   </div>
-                  {v != null && !inside && <span className="aii-group-bar-label outside">{fmtScore(v)}</span>}
-                </div>
-              ); })}
+                ); })}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
 function aiiAbbrevCol(name, max = 15) { return name && name.length > max ? name.slice(0, max) + '…' : (name || ''); }
+/* scorecard (>5 categories) — cells show the published component RANKS (score
+   only in the hover tooltip). Rows are ordered by the derived indicator rank
+   (*, average of component scores), shown with its YoY change where available. */
 function AIIScorecardTable({ data, selectedCountry, onPick }) {
   if (!data || !data.countries.length) return <div className="es-sub" style={{ padding: '30px 0', textAlign: 'center' }}>No comparison data available for this sub-indicator.</div>;
-  const rows = data.countries.map(c => { const vals = data.categories.map(cat => data.byCountry.get(c).get(cat)); const top = Math.max(...vals.filter(v => v != null), -Infinity); return { country: c, vals, top }; })
-    .sort((a, b) => b.top - a.top);
+  const hasYoY = data.countries.some(c => { const d = data.derived.get(c); return d && d.prevRank != null; });
+  const rows = data.countries.map(c => ({ country: c, derived: data.derived.get(c) || { rank: null, prevRank: null }, cells: data.categories.map(cat => data.byCountry.get(c).get(cat)) }));
   return (
     <div className="subtable-wrap aii-scorecard-wrapper">
       <table className="aii-scorecard-table">
-        <thead><tr><th>Country</th>{data.categories.map(cat => <th key={cat} title={cat}>{aiiAbbrevCol(cat)}</th>)}</tr></thead>
+        <thead><tr><th title="Derived indicator rank (average of component scores)">Rank*</th>{hasYoY && <th title="YoY change of derived indicator rank">YoY</th>}<th>Country</th>{data.categories.map(cat => <th key={cat} title={cat}>{aiiAbbrevCol(cat)}</th>)}</tr></thead>
         <tbody>
           {rows.map(r => (
             <tr key={r.country} className={r.country === selectedCountry ? 'selected-country' : ''} onClick={onPick ? () => onPick(r.country) : undefined}>
+              <td style={{ textAlign: 'right' }}>{r.derived.rank != null ? <>{r.derived.rank}{ordinal(r.derived.rank)}</> : <span className="muted">—</span>}</td>
+              {hasYoY && <td style={{ textAlign: 'right' }}>{aiiRankYoY(r.derived.rank, r.derived.prevRank)}</td>}
               <td>{r.country}</td>
-              {r.vals.map((v, i) => <td key={i}>{v != null ? fmtScore(v) : '—'}</td>)}
+              {r.cells.map((cell, i) => <td key={i} title={cell && cell.score != null ? 'Score: ' + fmtScore(cell.score) : undefined}>{cell && cell.rank != null ? cell.rank + ordinal(cell.rank) : '—'}</td>)}
             </tr>
           ))}
         </tbody>
@@ -95,28 +137,31 @@ function AIIScorecardTable({ data, selectedCountry, onPick }) {
 }
 
 
-/* left panel: country comparison bar chart, same-unit only, position-ranked,
-   direction-only YoY (no numeric magnitude — units vary too much to be
-   self-explanatory as a bare delta in a bar list). */
-function AIICompareChart({ rows, selectedCountry, onPick, unit }) {
-  if (!rows.length) return <div className="es-sub" style={{ padding: '30px 0', textAlign: 'center' }}>No comparison data available for this sub-indicator.</div>;
-  const max = Math.max(0.0001, ...rows.map(r => r.score));
-  const hasYoY = rows.some(r => r.prevScore != null);
+/* left panel: country comparison bar chart, same-unit only. Bars plot the
+   published RANK (1st = longest bar), never the score — the score appears only
+   in the hover tooltip. The YoY change of the rank sits on the LEFT of each
+   bar where a previous-year rank is available. */
+function AIICompareChart({ rows, selectedCountry, onPick }) {
+  const ranked = rows.filter(r => r.rank != null);
+  if (!ranked.length) return <div className="es-sub" style={{ padding: '30px 0', textAlign: 'center' }}>No comparison data available for this sub-indicator.</div>;
+  const maxRank = Math.max(1, ...ranked.map(r => r.rank));
+  const hasYoY = ranked.some(r => r.prevRank != null);
   return (
     <div className="barchart barchart-scroll">
-      {hasYoY && <div className="bar-chart-yoy-header">YoY</div>}
-      {rows.map(r => {
+      {hasYoY && <div className="bar-chart-yoy-header aii-yoy-hdr-left">YoY rank</div>}
+      {ranked.map(r => {
         const hi = r.country === selectedCountry;
-        const pct = Math.max(2, (r.score / max) * 100);
+        const pct = Math.max(6, ((maxRank - r.rank + 1) / maxRank) * 100);
+        const tip = 'Rank ' + r.rank + ordinal(r.rank) + (r.prevRank != null ? ' (' + r.prevRank + ordinal(r.prevRank) + ' last year)' : '') + (r.score != null ? ' · score ' + fmtScore(r.score) + (r.unit ? ' ' + r.unit : '') : '');
         return (
           <div key={r.country} className={'bar-row' + (hi ? ' selected' : '')} onClick={onPick ? () => onPick(r.country) : undefined}>
-            <span className="bar-rank">{r.pos}{ordinal(r.pos)}</span>
-            <div className="bar-track">
+            <span className="bar-rank">{r.rank}{ordinal(r.rank)}</span>
+            {hasYoY && <span className="aii-yoy-left" title="YoY change of rank">{aiiRankYoY(r.rank, r.prevRank)}</span>}
+            <div className="bar-track" title={tip}>
               <div className="bar-fill" style={{ width: pct + '%', background: hi ? 'var(--color-brand-navy)' : 'var(--color-bar-other)' }} />
               <span className={'bar-name' + (hi ? ' me' : '')} style={{ color: aiiBarLabelColor(pct), fontWeight: hi ? 700 : 600, textShadow: aiiBarLabelColor(pct) === '#FFFFFF' ? '0 1px 2px rgba(0,0,0,0.42)' : 'none' }}>{r.country}</span>
             </div>
             <span className="bar-flag" title={flagUrl(r.country) ? undefined : r.country}>{flagUrl(r.country) ? <img src={flagUrl(r.country)} alt="" onError={e => e.currentTarget.remove()} /> : null}</span>
-            <span className="bar-yoy-indicator">{aiiDirIcon(r.score, r.prevScore)}</span>
           </div>
         );
       })}
@@ -146,6 +191,15 @@ function AIIView({ domain, initialPillar }) {
   const [selThird, setSelThird] = React.useState(null);
   const [infoRow, setInfoRow] = React.useState(null);
   function aiiDef(sub, third) { return (window.DEFS || {})[`${AII_PUB}||${selPillar}||${sub || ''}||${third || ''}`] || null; }
+  /* parent-row definition with fallback: breakdown indicators often carry their
+     definition on the category (third-tier) rows — fall back to the first
+     category definition so every indicator row can offer an info button. */
+  function aiiParentDef(g) {
+    const d = aiiDef(g.sub, '');
+    if (d) return d;
+    if (g.hasBreakdown) { for (const c of g.children) { const cd = aiiDef(g.sub, c.label); if (cd) return cd; } }
+    return null;
+  }
   function openAiiInfo(row) { setInfoRow(row); }
   React.useEffect(() => { setSelSub(null); setSelThird(null); }, [year, selPillar]);
   const activeSub = (selSub && grouped.some(g => g.sub === selSub)) ? selSub : (grouped[0] ? grouped[0].sub : null);
@@ -234,9 +288,8 @@ function AIIView({ domain, initialPillar }) {
               ) : (
                 <div className="aii-pending">No data available</div>
               )}
-              <div className="g25-subpills" style={{ width: '100%', overflow: 'hidden' }}>
-                {c.badges.map(b => <span key={b.raw} className="aii-subpill" onClick={e => { e.stopPropagation(); pickBadge(c.pillar, b.raw); }}>{truncateBadge(b.abbr)}</span>)}
-                {c.remaining > 0 && <span className="badge-overflow">+ {c.remaining} more</span>}
+              <div className="g25-subpills" style={{ width: '100%' }}>
+                {c.badges.map(b => <span key={b.raw} className="aii-subpill" title={b.raw} onClick={e => { e.stopPropagation(); pickBadge(c.pillar, b.raw); }}>{stripYearInfo(b.raw)}</span>)}
               </div>
             </div>
           );
@@ -253,10 +306,11 @@ function AIIView({ domain, initialPillar }) {
             </div>
           </div>
           <div className="panel-body">
-            {cmpMode === 'flat' && <AIICompareChart rows={cmpFlatRows} selectedCountry={country} onPick={setCountry} unit={activeGroup ? activeGroup.unit : ''} />}
+            {cmpMode === 'flat' && <AIICompareChart rows={cmpFlatRows} selectedCountry={country} onPick={setCountry} />}
             {cmpMode === 'grouped' && <AIIGroupedChart data={cmpBreakdown} selectedCountry={country} onPick={setCountry} />}
             {cmpMode === 'scorecard' && <AIIScorecardTable data={cmpBreakdown} selectedCountry={country} onPick={setCountry} />}
           </div>
+          {cmpMode !== 'flat' && <div className="aii-rank-note" style={{ padding: '8px 14px 0', fontSize: '11.5px', lineHeight: 1.5, color: 'var(--color-text-tertiary)' }}>* Indicator ranks are based on the average of the component scores where a rank is not directly available in the publication.</div>}
           <ClassFoot pub={AII_PUB} year={year} />
         </div>
 
@@ -270,10 +324,11 @@ function AIIView({ domain, initialPillar }) {
               <thead>
                 <tr>
                   <th className="th-ind">Indicator</th>
-                  <th>{year}</th>
-                  <th>{year - 1}</th>
+                  <th>{year} Rank</th>
+                  <th>{year - 1} Rank</th>
+                  <th>{year} Score</th>
+                  <th>{year - 1} Score</th>
                   <th>YoY</th>
-                  <th className="unit-col">Unit</th>
                 </tr>
               </thead>
               <tbody>
@@ -283,25 +338,30 @@ function AIIView({ domain, initialPillar }) {
                   return (
                     <React.Fragment key={g.sub}>
                       <tr className={'row-data aii-parent-row' + (isActiveParent ? ' selected' : '')} onClick={() => pickParentRow(g)}>
-                        <td className="td-ind depth1">{g.hasBreakdown && <span className="aii-expand-icon" style={{ transform: isExpanded ? 'rotate(90deg)' : 'none' }}>▶</span>}{g.sub}{aiiDef(g.sub, '') && <button className="info-btn info-inline" title="View definition" onClick={e => { e.stopPropagation(); openAiiInfo({ label: g.sub, sub: g.sub, third: '', def: aiiDef(g.sub, '').d, score: g.hasBreakdown ? null : g.flatScore, prevScore: g.hasBreakdown ? null : g.prevFlatScore, delta: g.hasBreakdown ? null : (g.flatScore != null && g.prevFlatScore != null ? g.flatScore - g.prevFlatScore : null), hideScores: g.hasBreakdown }); }}>ⓘ</button>}</td>
-                        <td className="td-num cell-score">{g.hasBreakdown ? <span className="muted">—</span> : (g.flatScore != null ? <>{fmtScore(g.flatScore)}{aiiArrow(g.flatScore, g.prevFlatScore)}</> : <span className="muted">—</span>)}</td>
-                        <td className="td-num">{g.hasBreakdown ? <span className="muted">—</span> : (g.prevFlatScore != null ? fmtScore(g.prevFlatScore) : <span className="muted">—</span>)}</td>
-                        <td className="td-num">{g.hasBreakdown ? <span className="muted">—</span> : aiiYoYCell(g.flatScore, g.prevFlatScore)}</td>
-                        <td className="td-ind unit-col" style={{ color: 'var(--color-text-tertiary)', fontSize: 10.5 }}>{g.unit || '—'}</td>
+                        <td className="td-ind depth1">{g.hasBreakdown && <span className="aii-expand-icon" style={{ transform: isExpanded ? 'rotate(90deg)' : 'none' }}>▶</span>}{g.sub}<button className="info-btn info-inline" title="View definition" onClick={e => { e.stopPropagation(); const pd = aiiParentDef(g); openAiiInfo({ label: g.sub, sub: g.sub, third: '', def: pd ? pd.d : null, score: g.hasBreakdown ? null : g.flatScore, prevScore: g.hasBreakdown ? null : g.prevFlatScore, delta: g.hasBreakdown ? null : (g.flatScore != null && g.prevFlatScore != null ? g.flatScore - g.prevFlatScore : null), hideScores: g.hasBreakdown }); }}>ⓘ</button></td>
+                        {/* dropdown (breakdown) indicators: rank + score cells stay BLANK —
+                            the components below carry the values, and the chart shows the
+                            derived indicator rank. */}
+                        <td className="td-num cell-rank">{g.hasBreakdown ? null : aiiRankCell(g.flatRank)}</td>
+                        <td className="td-num">{g.hasBreakdown ? null : aiiRankCell(g.prevFlatRank)}</td>
+                        <td className="td-num cell-score">{g.hasBreakdown ? null : (g.flatScore != null ? <>{fmtScore(g.flatScore)}{aiiArrow(g.flatScore, g.prevFlatScore)}</> : <span className="muted">—</span>)}</td>
+                        <td className="td-num">{g.hasBreakdown ? null : (g.prevFlatScore != null ? fmtScore(g.prevFlatScore) : <span className="muted">—</span>)}</td>
+                        <td className="td-num">{g.hasBreakdown ? null : aiiYoYCell(g.flatScore, g.prevFlatScore)}</td>
                       </tr>
                       {g.hasBreakdown && isExpanded && g.children.map(c => (
                         <tr key={g.sub + '::' + c.label} className={'row-data aii-child-row' + (g.sub === activeSub && activeThird === c.label ? ' selected' : '')} onClick={e => { e.stopPropagation(); pickChildRow(g.sub, c.label); }}>
-                          <td className="td-ind depth1">{'└ ' + c.label}{aiiDef(g.sub, c.label) && <button className="info-btn info-inline" title="View definition" onClick={e => { e.stopPropagation(); openAiiInfo({ label: c.label, sub: g.sub, third: c.label, def: aiiDef(g.sub, c.label).d, score: c.score, prevScore: c.prevScore, delta: (c.score != null && c.prevScore != null ? c.score - c.prevScore : null) }); }}>ⓘ</button>}</td>
+                          <td className="td-ind depth1">{'└ ' + c.label}<button className="info-btn info-inline" title="View definition" onClick={e => { e.stopPropagation(); const cd = aiiDef(g.sub, c.label) || aiiDef(g.sub, ''); openAiiInfo({ label: c.label, sub: g.sub, third: c.label, def: cd ? cd.d : null, score: c.score, prevScore: c.prevScore, delta: (c.score != null && c.prevScore != null ? c.score - c.prevScore : null) }); }}>ⓘ</button></td>
+                          <td className="td-num cell-rank">{aiiRankCell(c.rank)}</td>
+                          <td className="td-num">{aiiRankCell(c.prevRank)}</td>
                           <td className="td-num cell-score">{c.score != null ? <>{fmtScore(c.score)}{aiiArrow(c.score, c.prevScore)}</> : <span className="muted">—</span>}</td>
                           <td className="td-num">{c.prevScore != null ? fmtScore(c.prevScore) : <span className="muted">—</span>}</td>
                           <td className="td-num">{aiiYoYCell(c.score, c.prevScore)}</td>
-                          <td className="td-ind unit-col" style={{ color: 'var(--color-text-tertiary)', fontSize: 10.5 }}>{c.unit || '—'}</td>
                         </tr>
                       ))}
                     </React.Fragment>
                   );
                 }) : (
-                  <tr><td colSpan={5} className="es-sub" style={{ padding: '24px 0', textAlign: 'center' }}>No indicator data available for {selPillar} · {country} · {year}.</td></tr>
+                  <tr><td colSpan={6} className="es-sub" style={{ padding: '24px 0', textAlign: 'center' }}>No indicator data available for {selPillar} · {country} · {year}.</td></tr>
                 )}
               </tbody>
             </table>
